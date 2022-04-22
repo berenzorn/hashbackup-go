@@ -274,7 +274,7 @@ type Print struct {
 // если новая строка из канала по типу
 // отличается от предыдущей - делаем отступ
 func logPrint(p chan Print) {
-	types := []string{"New file:", "Modified file:", "Missing from source:", "Copying file:"}
+	types := []string{"New file:", "Modified file:", "Missing from source:", "Copying file:", "Generating hash for:"}
 	line := 10 // out of array
 	for {
 		msg := <-p
@@ -390,6 +390,7 @@ func main() {
 		for k := range srcSha.Array {
 			if _, ok := dstSha.Array[k]; ok {
 				path := fmt.Sprintf(req.Source + string(os.PathSeparator) + k)
+				prints <- Print{Str: k, Type: 4, Quiet: Q}
 				srcSha.Array[k] = fc.fileCutter(path, completed, checksums, blocks)
 				if srcSha.Array[k] != dstSha.Array[k] {
 					prints <- Print{Str: k, Type: 1, Quiet: Q}
@@ -415,26 +416,33 @@ func main() {
 			}
 		}
 		// и копируем
+		var copyBuffer = int(8e6)
 		for k := range forCopy {
 			srcPath := fmt.Sprintf(req.Source + string(os.PathSeparator) + k)
 			dstPath := fmt.Sprintf(req.Destination + string(os.PathSeparator) + k)
 			prints <- Print{Str: k, Type: 3, Quiet: Q}
 			source, err := os.Open(srcPath)
+			source.Seek(0, 0)
 			checkFatal(err)
 			destination, err := os.Create(dstPath)
 			checkFatal(err)
-			buffer := make([]byte, BUFFER)
 			for {
+				buffer := make([]byte, copyBuffer)
 				n, err := source.Read(buffer)
-				if err != nil && err != io.EOF {
-					log.Fatal(err)
+				if err != nil {
+					if err != io.EOF {
+						log.Fatal(err)
+					} else {
+						break
+					}
 				}
 				if n == 0 {
 					break
 				}
-				_, err = destination.Write(buffer[:n])
-				checkFatal(err)
-				buffer = buffer[:0]
+				if _, err = destination.Write(buffer[:n]); err != nil {
+					log.Fatal(err)
+				}
+				buffer = nil
 			}
 			dstSha.Array[k] = forCopy[k]
 			source.Close()
