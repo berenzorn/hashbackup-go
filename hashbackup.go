@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha1"
-	"errors"
 	"fmt"
 	"hashbackup-go/file"
 	"io"
@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -161,33 +162,23 @@ q    Quiet mode, no output
 }
 
 // Checkout разбор параметров и заполнение структур
-func Checkout(args []string) (Options, Required, error) {
-	var opt Options
-	var req Required
-	switch len(args) {
-	case 0, 1:
+func Checkout(args []string) (opt Options, req Required, err error) {
+	var tail []string
+	if len(args) == 0 {
 		showHelp()
 		os.Exit(0)
-	case 2:
-		if args[0][0] == '-' {
-			if args[0][1] == 'h' {
+	}
+	for _, v := range args {
+		switch v[0] {
+		case '-':
+			switch v[1] {
+			case 'h':
 				showHelp()
 				os.Exit(0)
-			} else {
-				return opt, req, errors.New("wrong command line")
-			}
-		}
-		opt.Append = true
-		req.Source = args[0]
-		req.Destination = args[1]
-		return opt, req, nil
-	case 3:
-		for _, v := range args[0][1:] {
-			switch v {
-			case 'a':
-				opt.Append = true
 			case 's':
 				opt.Sync = true
+			case 'a':
+				opt.Append = true
 			case 'd':
 				opt.Delete = true
 			case 'q':
@@ -196,14 +187,27 @@ func Checkout(args []string) (Options, Required, error) {
 				showHelp()
 				os.Exit(0)
 			}
+		default:
+			tail = append(tail, v)
 		}
-		req.Source = args[1]
-		req.Destination = args[2]
-		return opt, req, nil
-	default:
-		return opt, req, errors.New("wrong command line")
 	}
-	return Options{}, Required{}, nil
+	if !opt.Sync {
+		opt.Append = true
+	}
+	if len(tail) != 2 {
+		showHelp()
+		os.Exit(0)
+	} else {
+		req.Source = strings.TrimRight(tail[0], "/\\")
+		if _, err = os.ReadDir(req.Source); err != nil {
+			return Options{}, Required{}, err
+		}
+		req.Destination = strings.TrimRight(tail[1], "/\\")
+		if _, err = os.ReadDir(req.Destination); err != nil {
+			return Options{}, Required{}, err
+		}
+	}
+	return
 }
 
 // NewsAndOrphans читаем каталог и находим новые файлы
@@ -337,10 +341,13 @@ func main() {
 	}
 
 	go logPrint(prints)
-	cpus := runtime.NumCPU()
+	cpus := runtime.NumCPU() - 2
+	if cpus < 1 {
+		cpus = 1
+	}
 	// одна горутина будет нарезать файл на части
 	fc = FileCutter{Routine: Routine{Name: "FileCutter", End: make(chan bool, 1)}}
-	// numcpu горутин будут считать sha
+	// numcpu-2 горутин будут считать sha
 	for i := 0; i < cpus; i++ {
 		bh := BlockHasher{Routine: Routine{Name: "BlockHasher", End: make(chan bool, 1)}}
 		pointers = append(pointers, &bh.Routine)
@@ -416,19 +423,22 @@ func main() {
 			}
 		}
 		// и копируем
-		var copyBuffer = int(8e6)
+		var cBuffSize = int(8e6) // 8 MB
 		for k := range forCopy {
 			srcPath := fmt.Sprintf(req.Source + string(os.PathSeparator) + k)
 			dstPath := fmt.Sprintf(req.Destination + string(os.PathSeparator) + k)
 			prints <- Print{Str: k, Type: 3, Quiet: Q}
 			source, err := os.Open(srcPath)
-			source.Seek(0, 0)
 			checkFatal(err)
+			_, err = source.Seek(0, 0)
+			check(err)
 			destination, err := os.Create(dstPath)
 			checkFatal(err)
+			reader := bufio.NewReader(source)
+			writer := bufio.NewWriter(destination)
+			cBuff := make([]byte, cBuffSize)
 			for {
-				buffer := make([]byte, copyBuffer)
-				n, err := source.Read(buffer)
+				n, err := reader.Read(cBuff)
 				if err != nil {
 					if err != io.EOF {
 						log.Fatal(err)
@@ -436,13 +446,9 @@ func main() {
 						break
 					}
 				}
-				if n == 0 {
-					break
-				}
-				if _, err = destination.Write(buffer[:n]); err != nil {
+				if _, err = writer.Write(cBuff[:n]); err != nil {
 					log.Fatal(err)
 				}
-				buffer = nil
 			}
 			dstSha.Array[k] = forCopy[k]
 			source.Close()
